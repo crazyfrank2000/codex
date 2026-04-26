@@ -1,13 +1,14 @@
 """
-TQQQ Monday 5D Tactical Backtest  ─  Long Only，三版过滤条件对比
-================================================================
+TQQQ Monday Momentum Backtest  ─  Long Only，持仓时长 + 均线过滤对比
+=====================================================================
 账户: $25,000  |  战术资金: $10,000  |  R: $250/笔
-入场: 周一收盘  |  出场: 周五收盘 或 止损 $250（战术资金的2.5%）
+入场: 周一收盘  |  出场: N 个交易日后收盘 或 止损 $250（战术资金的2.5%）
 
 版本对比：
-  V0  周一 TQQQ 涨                              → 买入 TQQQ（基线）
-  V1  周一 TQQQ 涨  ∧  QQQ > MA20             → 买入 TQQQ
-  V2  周一 TQQQ 涨  ∧  QQQ > MA20  ∧  QQQ > MA65  → 买入 TQQQ
+  V0-5D   周一TQQQ涨（无过滤，持有5天）
+  V0-10D  周一TQQQ涨（无过滤，持有10天）← 新增
+  V1-5D   周一TQQQ涨 ∧ QQQ>MA20（持有5天）
+  V2-5D   周一TQQQ涨 ∧ QQQ>MA20 ∧ QQQ>MA65（持有5天）
 
 注：MA 均以 QQQ 当日收盘前的历史数据计算，无未来数据泄漏。
 """
@@ -76,12 +77,15 @@ df["year_week"] = (df["iso_year"].astype(str) + "-"
 print(f"  回测区间: {df.index[0].date()} → {df.index[-1].date()}  ({len(df)} 交易日)")
 
 # ── 回测引擎 ─────────────────────────────────────────────────────────────────
-def run_backtest(df: pd.DataFrame, filter_mode: str = "none") -> pd.DataFrame:
+def run_backtest(df: pd.DataFrame, filter_mode: str = "none",
+                 max_hold_days: int = 5) -> pd.DataFrame:
     """
     filter_mode:
         'none'   → 仅周一TQQQ上涨
         'ma20'   → 周一TQQQ涨 ∧ QQQ > MA20
         'ma20_65'→ 周一TQQQ涨 ∧ QQQ > MA20 ∧ QQQ > MA65
+    max_hold_days:
+        入场当天算第1天，最多持有 N 个交易日（跨周无限制）
     """
     monday_dates = df.index[df["weekday"] == 0]
     trades = []
@@ -105,10 +109,8 @@ def run_backtest(df: pd.DataFrame, filter_mode: str = "none") -> pd.DataFrame:
                     or row["qqq_close"] <= row["qqq_ma65"]):
                 continue
 
-        # ── 本周持仓区间（最多5个交易日，周一到周五） ────────────────────
-        week_key  = row["year_week"]
-        week_idx  = df.index[df["year_week"] == week_key]
-        hold_days = week_idx[week_idx >= mon_date][:5]
+        # ── 持仓区间：入场日起最多 max_hold_days 个交易日（跨周） ──────────
+        hold_days = df.index[loc : loc + max_hold_days]
         if len(hold_days) < 2:
             continue
 
@@ -190,105 +192,124 @@ def calc_metrics(trades: pd.DataFrame, label: str) -> dict:
         止损触发率            = round((trades["exit_reason"] == "stop_loss").mean(), 4),
     )
 
-# ── 运行三个版本 ──────────────────────────────────────────────────────────────
+# ── 运行四个版本 ──────────────────────────────────────────────────────────────
 print("\n运行回测…")
+# (filter_mode, max_hold_days, key, label)
 versions = [
-    ("none",    "V0  周一TQQQ涨（无过滤，基线）"),
-    ("ma20",    "V1  周一TQQQ涨 ∧ QQQ>MA20"),
-    ("ma20_65", "V2  周一TQQQ涨 ∧ QQQ>MA20 ∧ QQQ>MA65"),
+    ("none",     5, "none_5d",  "V0-5D   无过滤·5天"),
+    ("none",    10, "none_10d", "V0-10D  无过滤·10天"),
+    ("ma20",     5, "ma20_5d",  "V1-5D   QQQ>MA20·5天"),
+    ("ma20_65",  5, "ma65_5d",  "V2-5D   QQQ>MA20∧MA65·5天"),
 ]
 
 all_trades  = {}
 all_metrics = []
 
-for fmode, label in versions:
-    t = run_backtest(df, filter_mode=fmode)
-    all_trades[fmode] = t
+for fmode, hold, key, label in versions:
+    t = run_backtest(df, filter_mode=fmode, max_hold_days=hold)
+    all_trades[key] = t
     all_metrics.append(calc_metrics(t, label))
 
 summary = pd.DataFrame(all_metrics)
 
-# ── 买入持有基准 ─────────────────────────────────────────────────────────────
-bnh_start = df["close"].iloc[0]
-bnh_end   = df["close"].iloc[-1]
-bnh_ret   = bnh_end / bnh_start - 1
+# ── 买入持有基准（TQQQ + QQQ） ───────────────────────────────────────────────
+def bnh_metrics(ticker: str, price_series: pd.Series, capital: float) -> dict:
+    start_p = float(price_series.iloc[0])
+    end_p   = float(price_series.iloc[-1])
+    shares  = int(capital // start_p)
+    equity  = capital + shares * (price_series - start_p)
+    dd      = float(((equity - equity.cummax()) / equity.cummax()).min())
+    return dict(
+        总收益率   = round(end_p / start_p - 1, 4),
+        账户最终权益 = round(capital + shares * (end_p - start_p), 2),
+        最大回撤   = round(dd, 4),
+    )
+
+qqq_bnh  = bnh_metrics("QQQ",  qqq.loc[df.index[0]:, "close"],  ACCOUNT_CAPITAL)
+tqqq_bnh = bnh_metrics("TQQQ", df["close"],                      ACCOUNT_CAPITAL)
 
 # ── 输出 ─────────────────────────────────────────────────────────────────────
-D = "═" * 76
+D  = "═" * 84
+D2 = "─" * 84
 
 print(f"\n{D}")
-print("  TQQQ 周一5日动量回测  ─  仅做多，QQQ均线过滤条件对比")
+print("  TQQQ 周一动量回测  ─  仅做多，持仓时长 + 均线过滤对比")
 print(f"  账户: ${ACCOUNT_CAPITAL:,}  |  战术资金: ${TACTICAL_CAPITAL:,}  |  R: ${R_DOLLAR}")
 print(f"  回测区间: {df.index[0].date()} → {df.index[-1].date()}")
 print(f"  均线参数: MA{MA_SHORT}（短期）  MA{MA_LONG}（长期）  ─  基于 QQQ 收盘价")
 print(D)
 
-# 核心指标横向对比表
-print(f"\n{'指标':<22}", end="")
+# ── 策略对比表 ────────────────────────────────────────────────────────────────
+COL = 18
+HDR = f"  {'指标':<20}"
 for m in all_metrics:
-    print(f"  {m['版本'][:28]:<28}", end="")
-print()
-print("─" * 76)
+    HDR += f"  {m['版本'][:COL]:<{COL}}"
+print(f"\n{HDR}")
+print(D2)
 
 row_keys = [
-    ("交易笔数",       "交易笔数",       "{}",      ""),
-    ("总净盈亏",       "总净盈亏",       "${:,.2f}", ""),
-    ("账户总收益率",   "账户总收益率",   "{:.2%}",  ""),
-    ("战术层总收益率", "战术层总收益率", "{:.2%}",  ""),
-    ("胜率",           "胜率",           "{:.2%}",  ""),
-    ("平均R",          "平均R",          "{:+.3f}R", ""),
-    ("中位R",          "中位R",          "{:+.3f}R", ""),
-    ("盈亏比PF",       "盈亏比PF",       "{:.3f}",  ""),
-    ("最大回撤_账户",  "最大回撤_账户",  "{:.2%}",  ""),
-    ("止损触发率",     "止损触发率",     "{:.2%}",  ""),
-    ("平均盈利",       "平均盈利",       "${:,.2f}", ""),
-    ("平均亏损",       "平均亏损",       "${:,.2f}", ""),
+    ("交易笔数",       "交易笔数",       "{}"),
+    ("总净盈亏",       "总净盈亏",       "${:,.0f}"),
+    ("账户总收益率",   "账户总收益率",   "{:.2%}"),
+    ("战术层总收益率", "战术层总收益率", "{:.2%}"),
+    ("胜率",           "胜率",           "{:.2%}"),
+    ("平均R",          "平均R",          "{:+.3f}R"),
+    ("中位R",          "中位R",          "{:+.3f}R"),
+    ("盈亏比PF",       "盈亏比PF",       "{:.3f}"),
+    ("最大回撤",       "最大回撤_账户",  "{:.2%}"),
+    ("止损触发率",     "止损触发率",     "{:.2%}"),
+    ("平均盈利",       "平均盈利",       "${:,.0f}"),
+    ("平均亏损",       "平均亏损",       "${:,.0f}"),
 ]
 
-for label, key, fmt, _ in row_keys:
-    print(f"  {label:<20}", end="")
+for disp, key, fmt in row_keys:
+    line = f"  {disp:<20}"
     for m in all_metrics:
         val = m[key]
         try:
             cell = fmt.format(val)
         except (ValueError, TypeError):
             cell = "N/A"
-        print(f"  {cell:<28}", end="")
-    print()
+        line += f"  {cell:<{COL}}"
+    print(line)
 
-print(f"\n{'─'*76}")
-print(f"  TQQQ 买入持有（同期基准）: {bnh_ret:.2%}   "
-      f"({df.index[0].date()} 以 ${bnh_start:.2f} 买入 → ${bnh_end:.2f})")
-print(f"  Barchart 5年摘要参考: +132.44%")
+# ── 买入持有基准行 ────────────────────────────────────────────────────────────
+print(D2)
+bnh_rows = [
+    ("总收益率",     "总收益率",   "{:.2%}"),
+    ("账户最终权益", "账户最终权益", "${:,.0f}"),
+    ("最大回撤",     "最大回撤",   "{:.2%}"),
+]
+print(f"\n  {'基准':<20}  {'TQQQ B&H':>{COL}}  {'QQQ B&H':>{COL}}")
+print(D2)
+for disp, key, fmt in bnh_rows:
+    t_str = fmt.format(tqqq_bnh[key])
+    q_str = fmt.format(qqq_bnh[key])
+    print(f"  {disp:<20}  {t_str:>{COL}}  {q_str:>{COL}}")
 print(D)
 
 # ── 各版本最近10笔交易 ────────────────────────────────────────────────────────
 cols_show = ["entry_date", "exit_date", "entry_price", "exit_price",
              "shares", "net_pnl", "R_multiple", "exit_reason"]
 
-for fmode, label in versions:
+for _, _, key, label in versions:
     print(f"\n{D}")
     print(f"  最近10笔交易  ─  {label}")
     print(D)
-    t = all_trades[fmode]
-    print(t[cols_show].tail(10).to_string(index=False))
+    print(all_trades[key][cols_show].tail(10).to_string(index=False))
 
-# ── 各版本出场原因统计 ────────────────────────────────────────────────────────
+# ── 出场原因统计 ──────────────────────────────────────────────────────────────
 print(f"\n{D}")
 print("  出场原因统计")
 print(D)
-for fmode, label in versions:
-    t = all_trades[fmode]
-    vc = t["exit_reason"].value_counts()
+for _, _, key, label in versions:
+    vc    = all_trades[key]["exit_reason"].value_counts()
     parts = "  |  ".join(f"{k}: {v}笔" for k, v in vc.items())
-    print(f"  {label[:38]:<38}  {parts}")
+    print(f"  {label:<30}  {parts}")
 
 # ── 保存 CSV ─────────────────────────────────────────────────────────────────
-for fmode, label in versions:
-    fname = f"TQQQ_5D_{fmode}_trades.csv"
-    all_trades[fmode].to_csv(fname, index=False)
-
-summary_cn = summary.copy()
-summary_cn.to_csv("TQQQ_5D_backtest_summary.csv", index=False)
-print(f"\n  已保存: TQQQ_5D_none_trades.csv / ma20_trades.csv / ma20_65_trades.csv / summary.csv")
+for _, _, key, label in versions:
+    all_trades[key].to_csv(f"TQQQ_{key}_trades.csv", index=False)
+summary.to_csv("TQQQ_backtest_summary.csv", index=False)
+print(f"\n  已保存: TQQQ_none_5d / none_10d / ma20_5d / ma65_5d _trades.csv + summary.csv")
 print(D + "\n")
