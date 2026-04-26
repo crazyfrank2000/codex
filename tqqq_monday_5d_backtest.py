@@ -21,12 +21,11 @@ import numpy as np
 from datetime import date, timedelta
 
 # ── 参数 ────────────────────────────────────────────────────────────────────
-ACCOUNT_CAPITAL  = 25_000
-TACTICAL_CAPITAL = 10_000
-R_DOLLAR         = 250
-COST_BPS         = 0.0        # 单边手续费（0 = 不计摩擦成本）
-MA_SHORT         = 20         # QQQ 短期均线
-MA_LONG          = 65         # QQQ 长期均线
+CAPITAL  = 10_000          # 唯一本金
+R_DOLLAR = 250             # 单笔最大亏损（本金的 2.5%）
+COST_BPS = 0.0
+MA_SHORT = 20
+MA_LONG  = 65
 
 # 多取60个交易日预热数据，确保 MA65 第一天就能计算
 START_DATA  = (date.today() - timedelta(days=5*365 + 120)).strftime("%Y-%m-%d")
@@ -108,7 +107,7 @@ def run_backtest(df: pd.DataFrame, mode: str = "long_only",
             continue
 
         entry_price = row["close"]
-        shares      = int(TACTICAL_CAPITAL // entry_price)
+        shares      = int(CAPITAL // entry_price)
         if shares <= 0:
             continue
         notional    = shares * entry_price
@@ -157,9 +156,8 @@ def run_backtest(df: pd.DataFrame, mode: str = "long_only",
         raise RuntimeError(f"mode='{mode}' 未产生任何交易。")
 
     result = pd.DataFrame(trades).sort_values("exit_date").reset_index(drop=True)
-    result["cum_pnl"]         = result["net_pnl"].cumsum()
-    result["account_equity"]  = ACCOUNT_CAPITAL  + result["cum_pnl"]
-    result["tactical_equity"] = TACTICAL_CAPITAL + result["cum_pnl"]
+    result["cum_pnl"]      = result["net_pnl"].cumsum()
+    result["equity"]       = CAPITAL + result["cum_pnl"]
     return result
 
 # ── 指标计算 ─────────────────────────────────────────────────────────────────
@@ -172,20 +170,19 @@ def calc_metrics(trades: pd.DataFrame, label: str) -> dict:
     losses = pnl[pnl < 0]
     pf     = wins.sum() / abs(losses.sum()) if len(losses) > 0 else np.nan
     return dict(
-        版本                  = label,
-        交易笔数              = len(trades),
-        总净盈亏              = round(pnl.sum(), 2),
-        账户最终权益          = round(trades["account_equity"].iloc[-1], 2),
-        账户总收益率          = round(trades["account_equity"].iloc[-1] / ACCOUNT_CAPITAL - 1, 4),
-        战术层总收益率        = round(trades["tactical_equity"].iloc[-1] / TACTICAL_CAPITAL - 1, 4),
-        胜率                  = round((pnl > 0).mean(), 4),
-        平均盈利              = round(wins.mean(), 2)   if len(wins)   else np.nan,
-        平均亏损              = round(losses.mean(), 2) if len(losses) else np.nan,
-        盈亏比PF              = round(pf, 3),
-        最大回撤_账户         = round(max_drawdown(trades["account_equity"]), 4),
-        平均R                 = round(trades["R_multiple"].mean(), 3),
-        中位R                 = round(trades["R_multiple"].median(), 3),
-        止损触发率            = round((trades["exit_reason"] == "stop_loss").mean(), 4),
+        版本         = label,
+        交易笔数     = len(trades),
+        总净盈亏     = round(pnl.sum(), 2),
+        最终权益     = round(trades["equity"].iloc[-1], 2),
+        总收益率     = round(trades["equity"].iloc[-1] / CAPITAL - 1, 4),
+        胜率         = round((pnl > 0).mean(), 4),
+        平均盈利     = round(wins.mean(), 2)   if len(wins)   else np.nan,
+        平均亏损     = round(losses.mean(), 2) if len(losses) else np.nan,
+        盈亏比PF     = round(pf, 3),
+        最大回撤     = round(max_drawdown(trades["equity"]), 4),
+        平均R        = round(trades["R_multiple"].mean(), 3),
+        中位R        = round(trades["R_multiple"].median(), 3),
+        止损触发率   = round((trades["exit_reason"] == "stop_loss").mean(), 4),
     )
 
 # ── 运行 4周期 × 2模式 = 8版本 ───────────────────────────────────────────────
@@ -206,39 +203,23 @@ for mode, mtag in MODES:
 
 summary = pd.DataFrame(all_metrics["long_only"] + all_metrics["long_short"])
 
-# ── 买入持有基准（TQQQ + QQQ，同期） ────────────────────────────────────────
-def bnh_metrics(price_series: pd.Series, capital: float,
-                idle_cash: float = 0.0) -> dict:
-    """
-    capital   : 实际买入金额（对应战术资金 $10,000）
-    idle_cash : 闲置现金（对应固定资金层 $15,000），不参与交易
-    账户最终权益 = 买入仓位盈亏 + capital + idle_cash
-    """
-    start_p = float(price_series.iloc[0])
-    end_p   = float(price_series.iloc[-1])
-    shares  = int(capital // start_p)
-    invested = shares * start_p
-    uninvested = capital - invested          # 买不满一股的零头
-    position_pnl = shares * (end_p - start_p)
-    final_equity = ACCOUNT_CAPITAL + position_pnl + uninvested - capital
-    # 简化：account = idle_cash + invested + pnl + uninvested
-    final_equity = idle_cash + invested + position_pnl + uninvested
-    equity_ts = idle_cash + uninvested + invested + shares * (price_series - start_p)
-    dd = float(((equity_ts - equity_ts.cummax()) / equity_ts.cummax()).min())
+# ── 买入持有基准（TQQQ + QQQ，同期，同等 $10,000 本金） ─────────────────────
+def bnh_metrics(price_series: pd.Series) -> dict:
+    start_p    = float(price_series.iloc[0])
+    end_p      = float(price_series.iloc[-1])
+    shares     = int(CAPITAL // start_p)
+    uninvested = CAPITAL - shares * start_p
+    equity_ts  = uninvested + shares * price_series
+    final_eq   = float(equity_ts.iloc[-1])
+    dd         = float(((equity_ts - equity_ts.cummax()) / equity_ts.cummax()).min())
     return dict(
-        买入股数     = shares,
-        买入均价     = round(start_p, 4),
-        期末价格     = round(end_p,   4),
-        仓位收益率   = round(end_p / start_p - 1, 4),
-        账户最终权益 = round(final_equity, 2),
-        账户总收益率 = round(final_equity / ACCOUNT_CAPITAL - 1, 4),
-        最大回撤     = round(dd, 4),
+        最终权益 = round(final_eq, 2),
+        总收益率 = round(final_eq / CAPITAL - 1, 4),
+        最大回撤 = round(dd, 4),
     )
 
-IDLE = ACCOUNT_CAPITAL - TACTICAL_CAPITAL   # $15,000 闲置现金
-
-tqqq_bnh = bnh_metrics(df["close"],                     TACTICAL_CAPITAL, IDLE)
-qqq_bnh  = bnh_metrics(qqq.loc[df.index[0]:, "close"],  TACTICAL_CAPITAL, IDLE)
+tqqq_bnh = bnh_metrics(df["close"])
+qqq_bnh  = bnh_metrics(qqq.loc[df.index[0]:, "close"])
 
 # ── 输出 ─────────────────────────────────────────────────────────────────────
 COL = 12
@@ -251,25 +232,25 @@ D2 = "─" * W
 MODE_LABELS = {"long_only": "仅做多 (Long Only)", "long_short": "多空双向 (Long/Short)"}
 
 metric_rows = [
-    ("交易笔数",     "交易笔数",       "{}",       None,          None),
-    ("总净盈亏",     "总净盈亏",       "${:,.0f}", None,          None),
-    ("账户总收益率", "账户总收益率",   "{:.2%}",   "账户总收益率","账户总收益率"),
-    ("账户最终权益", "账户最终权益",   "${:,.0f}", "账户最终权益","账户最终权益"),
-    ("战术层收益率", "战术层总收益率", "{:.2%}",   "仓位收益率",  "仓位收益率"),
-    ("胜率",         "胜率",           "{:.2%}",   None,          None),
-    ("平均R",        "平均R",          "{:+.3f}R", None,          None),
-    ("盈亏比PF",     "盈亏比PF",       "{:.3f}",   None,          None),
-    ("最大回撤",     "最大回撤_账户",  "{:.2%}",   "最大回撤",    "最大回撤"),
-    ("止损触发率",   "止损触发率",     "{:.2%}",   None,          None),
-    ("平均盈利",     "平均盈利",       "${:,.0f}", None,          None),
-    ("平均亏损",     "平均亏损",       "${:,.0f}", None,          None),
+    ("交易笔数",   "交易笔数",   "{}",        None,      None),
+    ("总净盈亏",   "总净盈亏",   "${:,.0f}",  None,      None),
+    ("总收益率",   "总收益率",   "{:.2%}",    "总收益率","总收益率"),
+    ("最终权益",   "最终权益",   "${:,.0f}",  "最终权益","最终权益"),
+    ("胜率",       "胜率",       "{:.2%}",    None,      None),
+    ("平均R",      "平均R",      "{:+.3f}R",  None,      None),
+    ("中位R",      "中位R",      "{:+.3f}R",  None,      None),
+    ("盈亏比PF",   "盈亏比PF",   "{:.3f}",    None,      None),
+    ("最大回撤",   "最大回撤",   "{:.2%}",    "最大回撤","最大回撤"),
+    ("止损触发率", "止损触发率", "{:.2%}",    None,      None),
+    ("平均盈利",   "平均盈利",   "${:,.0f}",  None,      None),
+    ("平均亏损",   "平均亏损",   "${:,.0f}",  None,      None),
 ]
 
 print(f"\n{D}")
 print("  TQQQ 周一动量回测  ─  Long Only vs Long/Short，持仓周期扫描")
-print(f"  账户: ${ACCOUNT_CAPITAL:,}  |  战术资金: ${TACTICAL_CAPITAL:,}  |  闲置: ${IDLE:,}  |  R: ${R_DOLLAR}")
+print(f"  本金: ${CAPITAL:,}  |  R: ${R_DOLLAR}（本金的{R_DOLLAR/CAPITAL:.1%}）  |  手续费: 0")
 print(f"  回测区间: {df.index[0].date()} → {df.index[-1].date()}")
-print(f"  B&H 基准: ${TACTICAL_CAPITAL:,} 战术资金买入 + ${IDLE:,} 现金（与策略结构一致）")
+print(f"  B&H 基准: 同样以 ${CAPITAL:,} 买入并持有至期末")
 print(D)
 
 for mode, mtag in MODES:
