@@ -187,7 +187,8 @@ def calc_metrics(trades: pd.DataFrame, label: str) -> dict:
 
 # ── 运行 4周期 × 2模式 = 8版本 ───────────────────────────────────────────────
 print("\n运行回测…")
-HOLDS = [(5, "1周"), (10, "2周"), (15, "3周"), (20, "1月")]
+HOLDS = [(5,"1周"),(10,"2周"),(15,"3周"),(20,"1月"),
+         (25,"5周"),(30,"6周"),(35,"7周"),(40,"2月")]
 MODES = [("long_only", "LO"), ("long_short", "LS")]
 
 all_trades  = {}
@@ -222,7 +223,7 @@ tqqq_bnh = bnh_metrics(df["close"])
 qqq_bnh  = bnh_metrics(qqq.loc[df.index[0]:, "close"])
 
 # ── 输出 ─────────────────────────────────────────────────────────────────────
-COL = 12
+COL = 10
 N_STRAT = len(HOLDS)                                    # 4 个周期
 N_BENCH = 2                                             # TQQQ + QQQ
 W = 22 + (COL + 2) * (N_STRAT + N_BENCH)
