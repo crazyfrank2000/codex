@@ -1,17 +1,14 @@
 """
-TQQQ Monday Momentum Backtest  ─  Long Only，持仓周期扫描
-==========================================================
+TQQQ Monday Momentum Backtest  ─  Long Only vs Long/Short，持仓周期扫描
+=======================================================================
 账户: $25,000  |  战术资金: $10,000  |  R: $250/笔
-信号: 周一 TQQQ 收盘 > 开盘（无额外过滤）
 出场: N 个交易日后收盘 或 止损 $250（战术资金的2.5%）
 
-持仓周期对比：
-   5D  ≈ 1 周
-  10D  ≈ 2 周
-  15D  ≈ 3 周
-  20D  ≈ 1 个月
+Long Only  : 周一收阳  → 做多 TQQQ；收阴 → 空仓
+Long/Short : 周一收阳  → 做多 TQQQ；收阴 → 做空 TQQQ
 
-基准：B&H TQQQ、B&H QQQ（同期）
+持仓周期: 5D(1周) / 10D(2周) / 15D(3周) / 20D(1月)
+基准    : B&H TQQQ、B&H QQQ（$10,000 战术资金，$15,000 闲置现金）
 """
 
 import sys
@@ -78,15 +75,17 @@ df["year_week"] = (df["iso_year"].astype(str) + "-"
 print(f"  回测区间: {df.index[0].date()} → {df.index[-1].date()}  ({len(df)} 交易日)")
 
 # ── 回测引擎 ─────────────────────────────────────────────────────────────────
-def run_backtest(df: pd.DataFrame, filter_mode: str = "none",
+def run_backtest(df: pd.DataFrame, mode: str = "long_only",
                  max_hold_days: int = 5) -> pd.DataFrame:
     """
-    filter_mode:
-        'none'   → 仅周一TQQQ上涨
-        'ma20'   → 周一TQQQ涨 ∧ QQQ > MA20
-        'ma20_65'→ 周一TQQQ涨 ∧ QQQ > MA20 ∧ QQQ > MA65
+    mode:
+        'long_only'  → 周一收阳做多；收阴空仓
+        'long_short' → 周一收阳做多；收阴做空
     max_hold_days:
         入场当天算第1天，最多持有 N 个交易日（跨周无限制）
+    止损:
+        多头: entry - R/shares（向下跌 $250 止损）
+        空头: entry + R/shares（向上涨 $250 止损）
     """
     monday_dates = df.index[df["weekday"] == 0]
     trades = []
@@ -95,71 +94,67 @@ def run_backtest(df: pd.DataFrame, filter_mode: str = "none",
         loc = df.index.get_loc(mon_date)
         row = df.iloc[loc]
 
-        # ── 信号条件 ───────────────────────────────────────────────────────
-        tqqq_up = row["close"] > row["open"]
-        if not tqqq_up:
-            continue
+        # ── 方向判断 ───────────────────────────────────────────────────────
+        if row["close"] > row["open"]:
+            direction = 1          # 多头
+        elif row["close"] < row["open"] and mode == "long_short":
+            direction = -1         # 空头
+        else:
+            continue               # 平盘 或 long_only 下的阴线 → 空仓
 
-        if filter_mode == "ma20":
-            if pd.isna(row["qqq_ma20"]) or row["qqq_close"] <= row["qqq_ma20"]:
-                continue
-
-        if filter_mode == "ma20_65":
-            if (pd.isna(row["qqq_ma20"]) or pd.isna(row["qqq_ma65"])
-                    or row["qqq_close"] <= row["qqq_ma20"]
-                    or row["qqq_close"] <= row["qqq_ma65"]):
-                continue
-
-        # ── 持仓区间：入场日起最多 max_hold_days 个交易日（跨周） ──────────
+        # ── 持仓区间（跨周） ───────────────────────────────────────────────
         hold_days = df.index[loc : loc + max_hold_days]
         if len(hold_days) < 2:
             continue
 
-        entry_price     = row["close"]
-        shares          = int(TACTICAL_CAPITAL // entry_price)
+        entry_price = row["close"]
+        shares      = int(TACTICAL_CAPITAL // entry_price)
         if shares <= 0:
             continue
-        notional        = shares * entry_price
-        r_per_share     = R_DOLLAR / shares
-        stop_price      = entry_price - r_per_share   # 多头止损
+        notional    = shares * entry_price
+        r_per_share = R_DOLLAR / shares
 
-        # ── 止损检查：周二起逐日检查当日最低价 ───────────────────────────
+        # 止损价：多头在下方，空头在上方
+        stop_price = entry_price - direction * r_per_share
+
+        # ── 逐日止损检查（入场日之后） ────────────────────────────────────
         exit_price  = df["close"].iloc[df.index.get_loc(hold_days[-1])]
         exit_date   = hold_days[-1]
         exit_reason = "time_exit"
 
         for day in hold_days[1:]:
             d_loc = df.index.get_loc(day)
-            if df["low"].iloc[d_loc] <= stop_price:
+            # 多头：当日最低价触及止损；空头：当日最高价触及止损
+            trigger = (df["low"].iloc[d_loc]  <= stop_price if direction ==  1
+                  else df["high"].iloc[d_loc] >= stop_price)
+            if trigger:
                 exit_price  = stop_price
                 exit_date   = day
                 exit_reason = "stop_loss"
                 break
 
-        # ── 盈亏 ─────────────────────────────────────────────────────────
-        gross_pnl    = shares * (exit_price - entry_price)
+        # ── 盈亏 ──────────────────────────────────────────────────────────
+        gross_pnl    = direction * shares * (exit_price - entry_price)
         trading_cost = notional * COST_BPS * 2
         net_pnl      = gross_pnl - trading_cost
 
         trades.append(dict(
-            entry_date    = mon_date.date(),
-            exit_date     = exit_date.date(),
-            entry_price   = round(entry_price, 4),
-            exit_price    = round(exit_price, 4),
-            stop_price    = round(stop_price, 4),
-            qqq_close     = round(row["qqq_close"], 4),
-            qqq_ma20      = round(row["qqq_ma20"], 4) if not pd.isna(row["qqq_ma20"]) else np.nan,
-            qqq_ma65      = round(row["qqq_ma65"], 4) if not pd.isna(row["qqq_ma65"]) else np.nan,
-            shares        = shares,
-            notional      = round(notional, 2),
-            gross_pnl     = round(gross_pnl, 2),
-            net_pnl       = round(net_pnl, 2),
-            R_multiple    = round(net_pnl / R_DOLLAR, 3),
-            exit_reason   = exit_reason,
+            entry_date  = mon_date.date(),
+            exit_date   = exit_date.date(),
+            direction   = "LONG" if direction == 1 else "SHORT",
+            entry_price = round(entry_price, 4),
+            exit_price  = round(exit_price,  4),
+            stop_price  = round(stop_price,  4),
+            shares      = shares,
+            notional    = round(notional,    2),
+            gross_pnl   = round(gross_pnl,   2),
+            net_pnl     = round(net_pnl,     2),
+            R_multiple  = round(net_pnl / R_DOLLAR, 3),
+            exit_reason = exit_reason,
         ))
 
     if not trades:
-        raise RuntimeError(f"filter_mode='{filter_mode}' 未产生任何交易，请检查数据或条件。")
+        raise RuntimeError(f"mode='{mode}' 未产生任何交易。")
 
     result = pd.DataFrame(trades).sort_values("exit_date").reset_index(drop=True)
     result["cum_pnl"]         = result["net_pnl"].cumsum()
@@ -193,25 +188,23 @@ def calc_metrics(trades: pd.DataFrame, label: str) -> dict:
         止损触发率            = round((trades["exit_reason"] == "stop_loss").mean(), 4),
     )
 
-# ── 运行四个持仓周期（均无过滤） ─────────────────────────────────────────────
+# ── 运行 4周期 × 2模式 = 8版本 ───────────────────────────────────────────────
 print("\n运行回测…")
-# (max_hold_days, key, label)
-versions = [
-    ( 5, "5d",  " 5D  ≈ 1周"),
-    (10, "10d", "10D  ≈ 2周"),
-    (15, "15d", "15D  ≈ 3周"),
-    (20, "20d", "20D  ≈ 1月"),
-]
+HOLDS = [(5, "1周"), (10, "2周"), (15, "3周"), (20, "1月")]
+MODES = [("long_only", "LO"), ("long_short", "LS")]
 
 all_trades  = {}
-all_metrics = []
+all_metrics = {"long_only": [], "long_short": []}
 
-for hold, key, label in versions:
-    t = run_backtest(df, filter_mode="none", max_hold_days=hold)
-    all_trades[key] = t
-    all_metrics.append(calc_metrics(t, label))
+for mode, mtag in MODES:
+    for hold, hlabel in HOLDS:
+        key   = f"{mtag}_{hold}d"
+        label = f"{hold}D·{hlabel}"
+        t = run_backtest(df, mode=mode, max_hold_days=hold)
+        all_trades[key] = t
+        all_metrics[mode].append(calc_metrics(t, label))
 
-summary = pd.DataFrame(all_metrics)
+summary = pd.DataFrame(all_metrics["long_only"] + all_metrics["long_short"])
 
 # ── 买入持有基准（TQQQ + QQQ，同期） ────────────────────────────────────────
 def bnh_metrics(price_series: pd.Series, capital: float,
@@ -248,87 +241,96 @@ tqqq_bnh = bnh_metrics(df["close"],                     TACTICAL_CAPITAL, IDLE)
 qqq_bnh  = bnh_metrics(qqq.loc[df.index[0]:, "close"],  TACTICAL_CAPITAL, IDLE)
 
 # ── 输出 ─────────────────────────────────────────────────────────────────────
-COL = 14
-D   = "═" * (24 + (COL + 2) * 6)
-D2  = "─" * (24 + (COL + 2) * 6)
+COL = 12
+N_STRAT = len(HOLDS)                                    # 4 个周期
+N_BENCH = 2                                             # TQQQ + QQQ
+W = 22 + (COL + 2) * (N_STRAT + N_BENCH)
+D  = "═" * W
+D2 = "─" * W
 
-print(f"\n{D}")
-print("  TQQQ 周一动量回测  ─  持仓周期扫描（仅做多，无过滤）")
-print(f"  信号: 周一 TQQQ 收盘 > 开盘  |  止损: ${R_DOLLAR}/笔 (战术资金的2.5%)")
-print(f"  账户: ${ACCOUNT_CAPITAL:,}  |  战术资金: ${TACTICAL_CAPITAL:,}  |  闲置现金: ${IDLE:,}  |  R: ${R_DOLLAR}")
-print(f"  回测区间: {df.index[0].date()} → {df.index[-1].date()}")
-print(f"  注: B&H 基准同样只用 ${TACTICAL_CAPITAL:,} 战术资金买入，${IDLE:,} 保持现金 ── 与策略结构一致")
-print(D)
-
-# ── 策略指标表 ────────────────────────────────────────────────────────────────
-# 表头：4 个策略列 + 2 个基准列
-hdr = f"\n  {'指标':<22}"
-for m in all_metrics:
-    hdr += f"  {m['版本'][:COL]:>{COL}}"
-hdr += f"  {'TQQQ B&H':>{COL}}  {'QQQ B&H':>{COL}}"
-print(hdr)
-print(D2)
+MODE_LABELS = {"long_only": "仅做多 (Long Only)", "long_short": "多空双向 (Long/Short)"}
 
 metric_rows = [
-    ("交易笔数",       "交易笔数",       "{}",        None,          None),
-    ("总净盈亏",       "总净盈亏",       "${:,.0f}",  None,          None),
-    ("账户总收益率",   "账户总收益率",   "{:.2%}",    "账户总收益率","账户总收益率"),
-    ("战术层收益率",   "战术层总收益率", "{:.2%}",    "仓位收益率",  "仓位收益率"),
-    ("账户最终权益",   "账户最终权益",   "${:,.0f}",  "账户最终权益","账户最终权益"),
-    ("胜率",           "胜率",           "{:.2%}",    None,          None),
-    ("平均R",          "平均R",          "{:+.3f}R",  None,          None),
-    ("中位R",          "中位R",          "{:+.3f}R",  None,          None),
-    ("盈亏比PF",       "盈亏比PF",       "{:.3f}",    None,          None),
-    ("最大回撤",       "最大回撤_账户",  "{:.2%}",    "最大回撤",    "最大回撤"),
-    ("止损触发率",     "止损触发率",     "{:.2%}",    None,          None),
-    ("平均盈利",       "平均盈利",       "${:,.0f}",  None,          None),
-    ("平均亏损",       "平均亏损",       "${:,.0f}",  None,          None),
+    ("交易笔数",     "交易笔数",       "{}",       None,          None),
+    ("总净盈亏",     "总净盈亏",       "${:,.0f}", None,          None),
+    ("账户总收益率", "账户总收益率",   "{:.2%}",   "账户总收益率","账户总收益率"),
+    ("账户最终权益", "账户最终权益",   "${:,.0f}", "账户最终权益","账户最终权益"),
+    ("战术层收益率", "战术层总收益率", "{:.2%}",   "仓位收益率",  "仓位收益率"),
+    ("胜率",         "胜率",           "{:.2%}",   None,          None),
+    ("平均R",        "平均R",          "{:+.3f}R", None,          None),
+    ("盈亏比PF",     "盈亏比PF",       "{:.3f}",   None,          None),
+    ("最大回撤",     "最大回撤_账户",  "{:.2%}",   "最大回撤",    "最大回撤"),
+    ("止损触发率",   "止损触发率",     "{:.2%}",   None,          None),
+    ("平均盈利",     "平均盈利",       "${:,.0f}", None,          None),
+    ("平均亏损",     "平均亏损",       "${:,.0f}", None,          None),
 ]
 
-for disp, skey, fmt, tkey, qkey in metric_rows:
-    line = f"  {disp:<22}"
-    for m in all_metrics:
-        val = m[skey]
-        try:    cell = fmt.format(val)
-        except: cell = "─"
-        line += f"  {cell:>{COL}}"
-    # 基准列
-    for bnh, bkey in [(tqqq_bnh, tkey), (qqq_bnh, qkey)]:
-        if bkey and bkey in bnh:
-            try:    cell = fmt.format(bnh[bkey])
+print(f"\n{D}")
+print("  TQQQ 周一动量回测  ─  Long Only vs Long/Short，持仓周期扫描")
+print(f"  账户: ${ACCOUNT_CAPITAL:,}  |  战术资金: ${TACTICAL_CAPITAL:,}  |  闲置: ${IDLE:,}  |  R: ${R_DOLLAR}")
+print(f"  回测区间: {df.index[0].date()} → {df.index[-1].date()}")
+print(f"  B&H 基准: ${TACTICAL_CAPITAL:,} 战术资金买入 + ${IDLE:,} 现金（与策略结构一致）")
+print(D)
+
+for mode, mtag in MODES:
+    metrics_list = all_metrics[mode]
+    print(f"\n  ── {MODE_LABELS[mode]} {'─'*40}")
+
+    # 表头
+    hdr = f"  {'指标':<20}"
+    for m in metrics_list:
+        hdr += f"  {m['版本'][:COL]:>{COL}}"
+    hdr += f"  {'TQQQ B&H':>{COL}}  {'QQQ B&H':>{COL}}"
+    print(hdr)
+    print(D2)
+
+    for disp, skey, fmt, tkey, qkey in metric_rows:
+        line = f"  {disp:<20}"
+        for m in metrics_list:
+            val = m[skey]
+            try:    cell = fmt.format(val)
             except: cell = "─"
-        else:
-            cell = "─"
-        line += f"  {cell:>{COL}}"
-    print(line)
+            line += f"  {cell:>{COL}}"
+        for bnh, bkey in [(tqqq_bnh, tkey), (qqq_bnh, qkey)]:
+            if bkey and bkey in bnh:
+                try:    cell = fmt.format(bnh[bkey])
+                except: cell = "─"
+            else:
+                cell = "─"
+            line += f"  {cell:>{COL}}"
+        print(line)
+    print(D2)
+
+    # 出场原因
+    print(f"  {'出场原因':<20}", end="")
+    for hold, hlabel in HOLDS:
+        key = f"{mtag}_{hold}d"
+        vc  = all_trades[key]["exit_reason"].value_counts()
+        sl  = vc.get("stop_loss", 0)
+        te  = vc.get("time_exit", 0)
+        print(f"  {f'SL{sl}/TE{te}':>{COL}}", end="")
+    print()
 
 print(D)
 
-# ── 最近10笔交易 ──────────────────────────────────────────────────────────────
-cols_show = ["entry_date", "exit_date", "entry_price", "exit_price",
-             "shares", "net_pnl", "R_multiple", "exit_reason"]
+# ── 最近10笔交易（仅20D版，Long Only 和 Long/Short各一张） ───────────────────
+cols_show = ["entry_date", "exit_date", "direction", "entry_price",
+             "exit_price", "shares", "net_pnl", "R_multiple", "exit_reason"]
 
-for hold, key, label in versions:
+for mode, mtag in MODES:
+    key = f"{mtag}_20d"
     print(f"\n{D}")
-    print(f"  最近10笔交易  ─  {label}")
+    print(f"  最近10笔交易  ─  20D · {MODE_LABELS[mode]}")
     print(D)
     print(all_trades[key][cols_show].tail(10).to_string(index=False))
 
-# ── 出场原因统计 ──────────────────────────────────────────────────────────────
-print(f"\n{D}")
-print("  出场原因统计")
-print(D)
-for hold, key, label in versions:
-    vc    = all_trades[key]["exit_reason"].value_counts()
-    parts = "  |  ".join(f"{k}: {v}笔" for k, v in vc.items())
-    print(f"  {label:<14}  {parts}")
 print(D)
 
 # ── 保存 CSV ─────────────────────────────────────────────────────────────────
-for hold, key, label in versions:
-    all_trades[key].to_csv(f"TQQQ_{key}_trades.csv", index=False)
+for mode, mtag in MODES:
+    for hold, hlabel in HOLDS:
+        key = f"{mtag}_{hold}d"
+        all_trades[key].to_csv(f"TQQQ_{key}_trades.csv", index=False)
 summary.to_csv("TQQQ_backtest_summary.csv", index=False)
-saved = " / ".join(f"TQQQ_{k}_trades.csv" for _, k, _ in versions)
-print(f"\n  已保存: {saved}")
-print(f"  已保存: TQQQ_backtest_summary.csv")
+print(f"\n  已保存: TQQQ_LO/LS_5d/10d/15d/20d_trades.csv  +  backtest_summary.csv")
 print(D + "\n")
