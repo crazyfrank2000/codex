@@ -87,9 +87,14 @@ def run_backtest(df: pd.DataFrame, mode: str = "long_only",
         空头: entry + R/shares（向上涨 $250 止损）
     """
     monday_dates = df.index[df["weekday"] == 0]
-    trades = []
+    trades   = []
+    open_until = pd.Timestamp.min   # 当前仓位的预计出场日，初始设为极早值
 
     for mon_date in monday_dates:
+        # ── 互斥：上一笔仓位尚未出场则跳过 ──────────────────────────────
+        if mon_date <= open_until:
+            continue
+
         loc = df.index.get_loc(mon_date)
         row = df.iloc[loc]
 
@@ -136,6 +141,8 @@ def run_backtest(df: pd.DataFrame, mode: str = "long_only",
         gross_pnl    = direction * shares * (exit_price - entry_price)
         trading_cost = notional * COST_BPS * 2
         net_pnl      = gross_pnl - trading_cost
+
+        open_until = exit_date          # 锁定：出场日之前不再开新仓
 
         trades.append(dict(
             entry_date  = mon_date.date(),
