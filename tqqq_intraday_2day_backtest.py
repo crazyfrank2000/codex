@@ -1,10 +1,10 @@
 """
-TQQQ 日内开盘区间 5D→2D 动量回测
-===================================
+TQQQ 日内开盘区间·当日收盘离场 回测
+======================================
 策略规则：
   信号  : 周一首根 N 分钟 K 线收盘 > 开盘  → LONG
   入场  : 周一首根 K 线收盘价（约 10:00 ET）
-  出场  : ① 最多持有 2 个交易日（周一剩余 + 周二全天）
+  出场  : ① 当日收盘（周一最后一根 K 线，约 16:00 ET）
           ② 持有期内任意 K 线最低价触及止损线即离场
   止损  : 固定亏损 $250（战术资金 $10,000 的 2.5%）
   标的  : TQQQ
@@ -28,13 +28,13 @@ from datetime import date
 ACCOUNT_CAPITAL  = 25_000
 TACTICAL_CAPITAL = 10_000
 R_DOLLAR         = 250
-MAX_HOLD_DAYS    = 2      # 最多持有 2 个完整交易日
+MAX_HOLD_DAYS    = 1      # 当日收盘离场（持有至周一最后一根 K 线）
 COST_BPS         = 0.0
 
 # 要对比的两组参数：(interval, period, label)
 CONFIGS = [
-    ("30m", "60d",  "30分钟K线 (~60天/11周一)"),
-    ("1h",  "730d", "1小时K线  (~730天/137周一)"),
+    ("30m", "60d",  "30分钟K线 (~60天/11周一) · 当日收盘离场"),
+    ("1h",  "730d", "1小时K线  (~730天/137周一) · 当日收盘离场"),
 ]
 
 # ── 下载并预处理日内数据 ─────────────────────────────────────────────────────
@@ -65,8 +65,8 @@ def run_intraday_backtest(df: pd.DataFrame, max_hold_days: int = 2) -> pd.DataFr
     """
     信号：周一首根 K 线（市场开盘后第一根）close > open → LONG
     入场：该首根 K 线收盘价
-    持仓：从入场 K 线之后开始，最多持有 max_hold_days 个交易日的剩余 K 线
-          例：max_hold_days=2  →  周一入场后剩余时段 + 整个周二
+    持仓：从入场 K 线之后开始，最多持有至当日（周一）收盘
+          max_hold_days=1  →  周一入场后剩余 K 线（当日 EOD 离场）
     止损：每根 K 线最低价触及止损线即按止损价离场
     """
     # 找所有交易日（按日期去重）
@@ -184,7 +184,7 @@ all_results = []
 all_trades  = {}
 
 print(D)
-print("  TQQQ 周一首根K线信号  |  最大持有 2 交易日  |  仅做多")
+print("  TQQQ 周一首根K线信号  |  当日收盘离场  |  仅做多")
 print(f"  账户 ${ACCOUNT_CAPITAL:,}  |  战术资金 ${TACTICAL_CAPITAL:,}  |  R ${R_DOLLAR}")
 print(D)
 
@@ -238,7 +238,7 @@ for interval, period, label in CONFIGS:
 
 # ── 与日线 V0（同期）对比：仅对 1h 版本对应区间跑一次日线 V0 ─────────────────
 print(f"\n{D}")
-print("  对比参照：日线 V0（同期，周一日线涨 → 持有至周五，最大5天）")
+print("  对比参照：日线 V0（同期，周一日线涨 → 持有至周五，最大5天）  vs  日内EOD版")
 print(D)
 
 # 取 1h 对应的时间区间跑日线版本
@@ -308,7 +308,7 @@ if h1_start is not None and not h1_start.empty:
 for interval, _, _ in CONFIGS:
     t = all_trades.get(interval)
     if t is not None and not t.empty:
-        fname = f"TQQQ_intraday_{interval.replace('m','min').replace('h','h')}_2day_trades.csv"
+        fname = f"TQQQ_intraday_{interval.replace('m','min').replace('h','h')}_eod_trades.csv"
         t.to_csv(fname, index=False)
         print(f"\n  已保存: {fname}")
 
