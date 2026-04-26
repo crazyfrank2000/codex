@@ -214,20 +214,38 @@ for hold, key, label in versions:
 summary = pd.DataFrame(all_metrics)
 
 # ── 买入持有基准（TQQQ + QQQ，同期） ────────────────────────────────────────
-def bnh_metrics(price_series: pd.Series, capital: float) -> dict:
+def bnh_metrics(price_series: pd.Series, capital: float,
+                idle_cash: float = 0.0) -> dict:
+    """
+    capital   : 实际买入金额（对应战术资金 $10,000）
+    idle_cash : 闲置现金（对应固定资金层 $15,000），不参与交易
+    账户最终权益 = 买入仓位盈亏 + capital + idle_cash
+    """
     start_p = float(price_series.iloc[0])
     end_p   = float(price_series.iloc[-1])
     shares  = int(capital // start_p)
-    equity  = capital + shares * (price_series - start_p)
-    dd      = float(((equity - equity.cummax()) / equity.cummax()).min())
+    invested = shares * start_p
+    uninvested = capital - invested          # 买不满一股的零头
+    position_pnl = shares * (end_p - start_p)
+    final_equity = ACCOUNT_CAPITAL + position_pnl + uninvested - capital
+    # 简化：account = idle_cash + invested + pnl + uninvested
+    final_equity = idle_cash + invested + position_pnl + uninvested
+    equity_ts = idle_cash + uninvested + invested + shares * (price_series - start_p)
+    dd = float(((equity_ts - equity_ts.cummax()) / equity_ts.cummax()).min())
     return dict(
-        总收益率     = round(end_p / start_p - 1, 4),
-        账户最终权益 = round(capital + shares * (end_p - start_p), 2),
+        买入股数     = shares,
+        买入均价     = round(start_p, 4),
+        期末价格     = round(end_p,   4),
+        仓位收益率   = round(end_p / start_p - 1, 4),
+        账户最终权益 = round(final_equity, 2),
+        账户总收益率 = round(final_equity / ACCOUNT_CAPITAL - 1, 4),
         最大回撤     = round(dd, 4),
     )
 
-tqqq_bnh = bnh_metrics(df["close"],                     ACCOUNT_CAPITAL)
-qqq_bnh  = bnh_metrics(qqq.loc[df.index[0]:, "close"],  ACCOUNT_CAPITAL)
+IDLE = ACCOUNT_CAPITAL - TACTICAL_CAPITAL   # $15,000 闲置现金
+
+tqqq_bnh = bnh_metrics(df["close"],                     TACTICAL_CAPITAL, IDLE)
+qqq_bnh  = bnh_metrics(qqq.loc[df.index[0]:, "close"],  TACTICAL_CAPITAL, IDLE)
 
 # ── 输出 ─────────────────────────────────────────────────────────────────────
 COL = 14
@@ -237,8 +255,9 @@ D2  = "─" * (24 + (COL + 2) * 6)
 print(f"\n{D}")
 print("  TQQQ 周一动量回测  ─  持仓周期扫描（仅做多，无过滤）")
 print(f"  信号: 周一 TQQQ 收盘 > 开盘  |  止损: ${R_DOLLAR}/笔 (战术资金的2.5%)")
-print(f"  账户: ${ACCOUNT_CAPITAL:,}  |  战术资金: ${TACTICAL_CAPITAL:,}  |  R: ${R_DOLLAR}")
+print(f"  账户: ${ACCOUNT_CAPITAL:,}  |  战术资金: ${TACTICAL_CAPITAL:,}  |  闲置现金: ${IDLE:,}  |  R: ${R_DOLLAR}")
 print(f"  回测区间: {df.index[0].date()} → {df.index[-1].date()}")
+print(f"  注: B&H 基准同样只用 ${TACTICAL_CAPITAL:,} 战术资金买入，${IDLE:,} 保持现金 ── 与策略结构一致")
 print(D)
 
 # ── 策略指标表 ────────────────────────────────────────────────────────────────
@@ -251,19 +270,19 @@ print(hdr)
 print(D2)
 
 metric_rows = [
-    ("交易笔数",       "交易笔数",       "{}",        None,    None),
-    ("总净盈亏",       "总净盈亏",       "${:,.0f}",  None,    None),
-    ("账户总收益率",   "账户总收益率",   "{:.2%}",    "总收益率",   "总收益率"),
-    ("战术层收益率",   "战术层总收益率", "{:.2%}",    None,    None),
-    ("账户最终权益",   "账户最终权益",   "${:,.0f}",  "账户最终权益", "账户最终权益"),
-    ("胜率",           "胜率",           "{:.2%}",    None,    None),
-    ("平均R",          "平均R",          "{:+.3f}R",  None,    None),
-    ("中位R",          "中位R",          "{:+.3f}R",  None,    None),
-    ("盈亏比PF",       "盈亏比PF",       "{:.3f}",    None,    None),
-    ("最大回撤",       "最大回撤_账户",  "{:.2%}",    "最大回撤",   "最大回撤"),
-    ("止损触发率",     "止损触发率",     "{:.2%}",    None,    None),
-    ("平均盈利",       "平均盈利",       "${:,.0f}",  None,    None),
-    ("平均亏损",       "平均亏损",       "${:,.0f}",  None,    None),
+    ("交易笔数",       "交易笔数",       "{}",        None,          None),
+    ("总净盈亏",       "总净盈亏",       "${:,.0f}",  None,          None),
+    ("账户总收益率",   "账户总收益率",   "{:.2%}",    "账户总收益率","账户总收益率"),
+    ("战术层收益率",   "战术层总收益率", "{:.2%}",    "仓位收益率",  "仓位收益率"),
+    ("账户最终权益",   "账户最终权益",   "${:,.0f}",  "账户最终权益","账户最终权益"),
+    ("胜率",           "胜率",           "{:.2%}",    None,          None),
+    ("平均R",          "平均R",          "{:+.3f}R",  None,          None),
+    ("中位R",          "中位R",          "{:+.3f}R",  None,          None),
+    ("盈亏比PF",       "盈亏比PF",       "{:.3f}",    None,          None),
+    ("最大回撤",       "最大回撤_账户",  "{:.2%}",    "最大回撤",    "最大回撤"),
+    ("止损触发率",     "止损触发率",     "{:.2%}",    None,          None),
+    ("平均盈利",       "平均盈利",       "${:,.0f}",  None,          None),
+    ("平均亏损",       "平均亏损",       "${:,.0f}",  None,          None),
 ]
 
 for disp, skey, fmt, tkey, qkey in metric_rows:
