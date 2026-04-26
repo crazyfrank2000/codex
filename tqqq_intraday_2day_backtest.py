@@ -304,6 +304,100 @@ if h1_start is not None and not h1_start.empty:
         vc2 = dt["exit_reason"].value_counts()
         print(f"\n  出场原因: {'  |  '.join(f'{k}: {v}笔' for k,v in vc2.items())}")
 
+# ── 买入持有基准 ─────────────────────────────────────────────────────────────
+def bnh_metrics(ticker: str, start: str, end: str, capital: float) -> dict:
+    """用日线收盘价计算买入持有收益与最大回撤。"""
+    raw = yf.download(ticker, start=start, end=end,
+                      auto_adjust=True, progress=False)
+    if raw.empty:
+        return {}
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = raw.columns.get_level_values(0)
+    closes = raw["Close"].dropna()
+    start_p = float(closes.iloc[0])
+    end_p   = float(closes.iloc[-1])
+    total_ret = end_p / start_p - 1
+    shares    = int(capital // start_p)
+    final_val = capital + shares * (end_p - start_p)
+    equity    = capital + shares * (closes - start_p)
+    dd        = float(((equity - equity.cummax()) / equity.cummax()).min())
+    return dict(
+        ticker     = ticker,
+        区间       = f"{closes.index[0].date()} → {closes.index[-1].date()}",
+        买入价     = round(start_p, 4),
+        卖出价     = round(end_p,   4),
+        总收益率   = round(total_ret, 4),
+        账户最终权益 = round(final_val, 2),
+        账户收益率 = round(final_val / ACCOUNT_CAPITAL - 1, 4),
+        最大回撤   = round(dd, 4),
+    )
+
+print(f"\n{D}")
+print("  买入持有基准  ─  TQQQ 与 QQQ")
+print(D)
+
+# 对应 1h 策略区间（较长，统计意义强）
+h1_trades = all_trades.get("1h")
+if h1_trades is not None and not h1_trades.empty:
+    bnh_start = str(h1_trades["entry_date"].min())
+    bnh_end   = str(h1_trades["exit_date"].max())
+
+    print(f"\n  区间: {bnh_start} → {bnh_end}  （对应 1h·EOD 策略区间）\n")
+    print(f"  {'指标':<18}  {'TQQQ B&H':>14}  {'QQQ B&H':>14}  {'1h·EOD策略':>14}")
+    print(f"  {'─'*64}")
+
+    bnh_tqqq = bnh_metrics("TQQQ", bnh_start, bnh_end, ACCOUNT_CAPITAL)
+    bnh_qqq  = bnh_metrics("QQQ",  bnh_start, bnh_end, ACCOUNT_CAPITAL)
+
+    # 策略数据取自已算好的 1h metrics
+    h1_m = next((m for m in all_results if "1小时" in m.get("版本", "")), None)
+
+    rows = [
+        ("总收益率",   "总收益率",       "{:.2%}", "账户总收益率"),
+        ("账户最终权益", "账户最终权益",  "${:,.0f}", "账户最终权益"),
+        ("最大回撤",   "最大回撤",       "{:.2%}", "最大回撤"),
+    ]
+    for label, key, fmt, strat_key in rows:
+        t_val = bnh_tqqq.get(key, float("nan"))
+        q_val = bnh_qqq.get(key,  float("nan"))
+        s_val = h1_m.get(strat_key, float("nan")) if h1_m else float("nan")
+        try:
+            t_str = fmt.format(t_val)
+            q_str = fmt.format(q_val)
+            s_str = fmt.format(s_val)
+        except Exception:
+            t_str = q_str = s_str = "N/A"
+        print(f"  {label:<18}  {t_str:>14}  {q_str:>14}  {s_str:>14}")
+
+# 对应 30m 策略区间（较短）
+m30_trades = all_trades.get("30m")
+if m30_trades is not None and not m30_trades.empty:
+    bnh_start2 = str(m30_trades["entry_date"].min())
+    bnh_end2   = str(m30_trades["exit_date"].max())
+
+    print(f"\n  区间: {bnh_start2} → {bnh_end2}  （对应 30m·EOD 策略区间）\n")
+    print(f"  {'指标':<18}  {'TQQQ B&H':>14}  {'QQQ B&H':>14}  {'30m·EOD策略':>14}")
+    print(f"  {'─'*64}")
+
+    bnh_tqqq2 = bnh_metrics("TQQQ", bnh_start2, bnh_end2, ACCOUNT_CAPITAL)
+    bnh_qqq2  = bnh_metrics("QQQ",  bnh_start2, bnh_end2, ACCOUNT_CAPITAL)
+
+    m30_m = next((m for m in all_results if "30分钟" in m.get("版本", "")), None)
+
+    for label, key, fmt, strat_key in rows:
+        t_val = bnh_tqqq2.get(key, float("nan"))
+        q_val = bnh_qqq2.get(key,  float("nan"))
+        s_val = m30_m.get(strat_key, float("nan")) if m30_m else float("nan")
+        try:
+            t_str = fmt.format(t_val)
+            q_str = fmt.format(q_val)
+            s_str = fmt.format(s_val)
+        except Exception:
+            t_str = q_str = s_str = "N/A"
+        print(f"  {label:<18}  {t_str:>14}  {q_str:>14}  {s_str:>14}")
+
+print(f"\n{D}")
+
 # ── 保存 CSV ─────────────────────────────────────────────────────────────────
 for interval, _, _ in CONFIGS:
     t = all_trades.get(interval)
