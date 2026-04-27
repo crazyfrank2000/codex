@@ -324,3 +324,52 @@ for mode, mtag in MODES:
 summary.to_csv("TQQQ_backtest_summary.csv", index=False)
 print(f"\n  已保存: TQQQ_LO/LS_5d/10d/15d/20d_trades.csv  +  backtest_summary.csv")
 print(D + "\n")
+
+# ── 综合对比表：5D–60D Long Only 全周期汇总 ──────────────────────────────────
+print("\n" + "═"*110)
+print("  TQQQ 周一动量  ─  Long Only 持仓周期综合对比（5D → 60D）")
+print("  本金 $10,000 | R=$250 | 无手续费")
+print("═"*110)
+
+lo_metrics = all_metrics["long_only"]
+
+# 表头
+print(f"  {'持仓':>6}  {'交易数':>6}  {'总回报':>8}  {'最终权益':>10}  {'平均R':>7}  "
+      f"{'PF':>6}  {'胜率':>6}  {'止损率':>6}  {'最大回撤':>8}  {'平均盈利':>9}  注")
+print("  " + "─"*104)
+
+for i, m in enumerate(lo_metrics):
+    hold_days = HOLDS[i][0]
+    label     = HOLDS[i][1]
+    best_ret  = max(lo_metrics, key=lambda x: x["总收益率"])
+    best_pf   = max(lo_metrics, key=lambda x: x["盈亏比PF"])
+    best_dd   = min(lo_metrics, key=lambda x: x["最大回撤"])   # 最小（最负值）→最差；max最好
+
+    note = ""
+    if m["总收益率"] == best_ret["总收益率"]: note += "★回报最高 "
+    if m["盈亏比PF"] == best_pf["盈亏比PF"]: note += "★PF最高 "
+
+    print(f"  {label:>6}({hold_days:2d}D)  {m['交易笔数']:>6}  {m['总收益率']:>+7.1%}  "
+          f"${m['最终权益']:>9,.0f}  {m['平均R']:>+6.3f}R  {m['盈亏比PF']:>6.3f}  "
+          f"{m['胜率']:>5.1%}  {m['止损触发率']:>5.1%}  {m['最大回撤']:>+7.1%}  "
+          f"${m['平均盈利']:>8,.0f}  {note}")
+
+print("  " + "─"*104)
+
+# B&H 基准行
+tqqq_ret = tqqq_bnh["总收益率"]
+tqqq_eq  = tqqq_bnh["最终权益"]
+tqqq_dd  = tqqq_bnh["最大回撤"]
+qqq_ret  = qqq_bnh["总收益率"]
+qqq_eq   = qqq_bnh["最终权益"]
+qqq_dd   = qqq_bnh["最大回撤"]
+
+print(f"  {'─基准─':>6}       {'':>6}  {'':>8}  {'':>10}  {'':>7}  {'':>6}  {'':>6}  {'':>6}  {'':>8}  {'':>9}")
+print(f"  {'TQQQ':>6} B&H   {'─':>6}  {tqqq_ret:>+7.1%}  ${tqqq_eq:>9,.0f}  {'─':>7}  {'─':>6}  "
+      f"{'─':>6}  {'─':>6}  {tqqq_dd:>+7.1%}  {'─':>9}  买入持有整个回测期")
+print(f"  {'QQQ':>6} B&H    {'─':>6}  {qqq_ret:>+7.1%}  ${qqq_eq:>9,.0f}  {'─':>7}  {'─':>6}  "
+      f"{'─':>6}  {'─':>6}  {qqq_dd:>+7.1%}  {'─':>9}  买入持有整个回测期")
+
+print("═"*110)
+print(f"  注：★ = 该周期在该指标上为所有12档最优值")
+print("═"*110 + "\n")
